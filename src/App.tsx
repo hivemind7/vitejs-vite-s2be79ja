@@ -106,7 +106,7 @@ const appId = typeof __app_id !== 'undefined' && __app_id ? __app_id : 'global-l
 
 // YOUR REAL CONFIGURATION
 const firebaseConfig = {
-  apiKey: "AIzaSyCNwBTl66k4srIxLAEaJkdH7g0LXfEmMyY",
+  apiKey: "AAIzaSyAWQg_QaPJbcoDtWywzaB7E-hfmwXrOFeM",
   authDomain: "global-learning-248f6.firebaseapp.com",
   projectId: "global-learning-248f6",
   storageBucket: "global-learning-248f6.firebasestorage.app",
