@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { 
   LayoutGrid, Users, Settings, Command, Save, Loader, Send, Plus, Trash2, 
   FileText, UploadCloud, CheckCircle, Globe, MessageCircle, ListChecks, 
@@ -6,7 +6,8 @@ import {
   PieChart, ThumbsUp, RefreshCw, AlertTriangle, Clock, Image as ImageIcon, 
   X, Lightbulb, Book, Lock, Unlock, Shield, KeyRound, PenTool, Copy, 
   ChevronRight, Bell, Search, Menu, MoreVertical, Filter, LucideIcon,
-  Moon, Sun, Download
+  Moon, Sun, Download, Sparkles, FileSpreadsheet, Edit, ChevronDown, Clipboard,
+  CalendarDays, BookOpenCheck
 } from 'lucide-react';
 
 // --- FIREBASE IMPORTS ---
@@ -78,6 +79,26 @@ interface PlickerAnalysis {
   struggling: PlickerResult[];
 }
 
+interface ChatMessage {
+  role: 'user' | 'model';
+  text: string;
+  timestamp: number;
+}
+
+interface TermSettings {
+  t1: string;
+  t2: string;
+  t3: string;
+}
+
+interface LessonPlan {
+  topic: string;
+  materials: string;
+}
+
+// classId -> termId ('t1'|'t2'|'t3') -> weekNum -> LessonPlan
+type CurriculumData = Record<string, Record<string, Record<number, LessonPlan>>>;
+
 type AttendanceStatus = 'present' | 'absent' | 'late';
 
 // --- CONFIG & INITIALIZATION ---
@@ -85,7 +106,7 @@ const appId = typeof __app_id !== 'undefined' && __app_id ? __app_id : 'global-l
 
 // YOUR REAL CONFIGURATION
 const firebaseConfig = {
-  apiKey: "AIzaSyAWQg_QaPJbcoDtWywzaB7E-hfmwXrOFeM",
+  apiKey: "AIzaSyCNwBTl66k4srIxLAEaJkdH7g0LXfEmMyY",
   authDomain: "global-learning-248f6.firebaseapp.com",
   projectId: "global-learning-248f6",
   storageBucket: "global-learning-248f6.firebasestorage.app",
@@ -102,7 +123,6 @@ let analytics: Analytics | undefined;
 let isDemoMode = false; 
 
 try {
-    // Ensure apiKey is present and valid before initializing
     if (!firebaseConfig.apiKey || firebaseConfig.apiKey.length < 10) {
         throw new Error("Invalid or missing API Key");
     }
@@ -113,6 +133,34 @@ try {
 } catch (e) {
   console.warn("Firebase initialization failed. Running in DEMO MODE.", e);
   isDemoMode = true;
+}
+
+// --- GEMINI API HELPER ---
+const GEMINI_API_KEY = ""; // Provided by runtime environment
+
+async function callGemini(prompt: string): Promise<string> {
+  try {
+    const response = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${GEMINI_API_KEY}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: prompt }] }]
+        })
+      }
+    );
+
+    if (!response.ok) {
+      throw new Error(`Gemini API Error: ${response.statusText}`);
+    }
+
+    const data = await response.json();
+    return data.candidates?.[0]?.content?.parts?.[0]?.text || "Sorry, I couldn't generate a response.";
+  } catch (error) {
+    console.error("Gemini API Request Failed", error);
+    return "I'm currently offline or experiencing high traffic. Please try again later.";
+  }
 }
 
 // --- MOCK DATA ---
@@ -138,6 +186,12 @@ const INITIAL_SCHEDULE: Record<string, ScheduleEntry[]> = {
   Tuesday: [], Wednesday: [], Thursday: [], Friday: [] 
 };
 
+const INITIAL_TERM_SETTINGS: TermSettings = {
+  t1: new Date().toISOString().split('T')[0],
+  t2: '',
+  t3: ''
+};
+
 // --- COMPONENTS ---
 
 interface CardProps {
@@ -145,10 +199,17 @@ interface CardProps {
   className?: string;
   noPadding?: boolean;
   onClick?: () => void;
+  onPaste?: (e: React.ClipboardEvent) => void;
+  tabIndex?: number;
 }
 
-const Card: React.FC<CardProps> = ({ children, className = "", noPadding = false, onClick }) => (
-  <div onClick={onClick} className={`bg-white dark:bg-slate-800 rounded-2xl shadow-sm border border-slate-200/60 dark:border-slate-700 overflow-hidden transition-all duration-200 hover:shadow-md hover:border-indigo-100 dark:hover:border-slate-600 ${noPadding ? '' : 'p-6'} ${className}`}>
+const Card: React.FC<CardProps> = ({ children, className = "", noPadding = false, onClick, onPaste, tabIndex }) => (
+  <div 
+    onClick={onClick} 
+    onPaste={onPaste}
+    tabIndex={tabIndex}
+    className={`bg-white dark:bg-slate-800 rounded-2xl shadow-sm border border-slate-200/60 dark:border-slate-700 overflow-hidden transition-all duration-200 hover:shadow-md hover:border-indigo-100 dark:hover:border-slate-600 outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 ${noPadding ? '' : 'p-6'} ${className}`}
+  >
     {children}
   </div>
 );
@@ -156,7 +217,7 @@ const Card: React.FC<CardProps> = ({ children, className = "", noPadding = false
 interface ButtonProps {
   children: React.ReactNode;
   onClick?: () => void;
-  variant?: 'primary' | 'secondary' | 'danger' | 'ghost' | 'success';
+  variant?: 'primary' | 'secondary' | 'danger' | 'ghost' | 'success' | 'ai';
   className?: string;
   icon?: LucideIcon;
   disabled?: boolean;
@@ -178,6 +239,7 @@ const Button: React.FC<ButtonProps> = ({ children, onClick, variant = 'primary',
     danger: "bg-red-50 dark:bg-red-900/20 text-red-600 dark:text-red-400 hover:bg-red-100 dark:hover:bg-red-900/30 border border-red-100 dark:border-red-800",
     ghost: "text-slate-500 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-700 hover:text-slate-700 dark:hover:text-slate-200",
     success: "bg-emerald-600 text-white hover:bg-emerald-700 shadow-lg shadow-emerald-200",
+    ai: "bg-gradient-to-r from-blue-500 to-purple-600 text-white hover:from-blue-600 hover:to-purple-700 shadow-lg shadow-purple-200",
   };
 
   return (
@@ -236,13 +298,17 @@ export default function App() {
   // Data States
   const [classes, setClasses] = useState<ClassData[]>(INITIAL_CLASSES);
   const [schedule, setSchedule] = useState<Record<string, ScheduleEntry[]>>(INITIAL_SCHEDULE);
-  // Record<ClassId, Record<Date, Record<StudentId, Status>>>
   const [attendanceHistory, setAttendanceHistory] = useState<Record<string, Record<string, Record<string, AttendanceStatus>>>>({}); 
   const [seatingChart, setSeatingChart] = useState<Record<string, (number | undefined)[]>>({});
   const [homeworkList, setHomeworkList] = useState<Homework[]>([]);
   const [scheduleImages, setScheduleImages] = useState<{ weekly: string | null, yearly: string | null }>({ weekly: null, yearly: null });
   const [sharedTodos, setSharedTodos] = useState<Todo[]>([]);
   
+  // Curriculum States
+  const [termSettings, setTermSettings] = useState<TermSettings>(INITIAL_TERM_SETTINGS);
+  const [curriculum, setCurriculum] = useState<CurriculumData>({});
+  const [activeTermId, setActiveTermId] = useState<'t1' | 't2' | 't3'>('t1');
+
   // UI States
   const [activeTab, setActiveTab] = useState('dashboard');
   const [selectedClassId, setSelectedClassId] = useState('c1');
@@ -258,6 +324,19 @@ export default function App() {
   // Report Gen States
   const [reportStudentId, setReportStudentId] = useState('');
   const [generatedReport, setGeneratedReport] = useState('');
+  const [isGeneratingReport, setIsGeneratingReport] = useState(false);
+
+  // AI Chat States
+  const [aiChatHistory, setAiChatHistory] = useState<ChatMessage[]>([
+    { role: 'model', text: "Hello! I'm your teaching assistant. I can help you plan lessons, write emails, or analyze student data. How can I help you today?", timestamp: Date.now() }
+  ]);
+  const [aiInput, setAiInput] = useState('');
+  const [isAiThinking, setIsAiThinking] = useState(false);
+  const chatEndRef = useRef<HTMLDivElement>(null);
+
+  // Class Management States
+  const [newClassName, setNewClassName] = useState('');
+  const [newStudentName, setNewStudentName] = useState('');
 
   // --- MEMOIZED HELPERS ---
   const currentClass = useMemo(() => classes.find(c => c.id === selectedClassId), [classes, selectedClassId]);
@@ -268,8 +347,55 @@ export default function App() {
     return attendanceHistory[selectedClassId]?.[dateKey] || {};
   }, [attendanceHistory, selectedClassId, currentDate]);
 
+  // Calculate current Term and Week based on termSettings
+  const getTermContext = (date: Date) => {
+    const dateStr = date.toISOString().split('T')[0];
+    
+    // Helper to check if date is within range (approx 12 weeks)
+    const getWeekDiff = (startStr: string) => {
+        if (!startStr) return -1;
+        const start = new Date(startStr);
+        const diffTime = date.getTime() - start.getTime();
+        const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+        const week = Math.ceil(diffDays / 7);
+        return week;
+    };
+
+    // Naive check: Assuming terms don't overlap and are in order for current usage
+    // Prioritize latest term that has started
+    let term = 't1';
+    let week = getWeekDiff(termSettings.t1);
+
+    if (termSettings.t2 && dateStr >= termSettings.t2) {
+        term = 't2';
+        week = getWeekDiff(termSettings.t2);
+    }
+    if (termSettings.t3 && dateStr >= termSettings.t3) {
+        term = 't3';
+        week = getWeekDiff(termSettings.t3);
+    }
+
+    return { term, week: week > 0 ? week : 1 };
+  };
+
   // --- EFFECTS ---
   
+  // Load Excel Library
+  useEffect(() => {
+    const script = document.createElement('script');
+    script.src = "https://cdn.sheetjs.com/xlsx-latest/package/dist/xlsx.full.min.js";
+    script.async = true;
+    document.body.appendChild(script);
+    return () => {
+      if (document.body.contains(script)) document.body.removeChild(script);
+    }
+  }, []);
+
+  // Auto-scroll chat
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [aiChatHistory]);
+
   // Dark Mode Toggle
   useEffect(() => {
     if (isDarkMode) {
@@ -288,7 +414,6 @@ export default function App() {
 
   // Auth Init
   useEffect(() => {
-    // If we defaulted to demo mode initially, just set the fake user
     if (isDemoMode) {
       setTimeout(() => {
         setUser({ uid: 'demo-teacher', email: 'teacher@demo.com' } as User);
@@ -297,7 +422,6 @@ export default function App() {
       return;
     }
 
-    // Attempt connection
     const initAuth = async () => {
       if (!auth) return;
       try {
@@ -308,7 +432,6 @@ export default function App() {
         }
       } catch (error) {
         console.error("Auth connection failed, falling back to demo mode", error);
-        // Fallback to demo user if connection fails (e.g. bad API key or network)
         setUser({ uid: 'demo-teacher', email: 'teacher@demo.com' } as User);
         setIsAuthLoading(false);
       }
@@ -329,14 +452,12 @@ export default function App() {
 
   // Data Sync
   useEffect(() => {
-    // If we can't sync, just return a no-op cleanup function
     if (!user || isDemoMode || !db) return () => {};
 
     let unsubMain: (() => void) | undefined;
     let unsubImg: (() => void) | undefined;
     let unsubTodos: (() => void) | undefined;
 
-    // We wrap this in a try-catch to prevent crashes if Firestore is locked
     try {
         const userDocRef = doc(db, 'artifacts', appId, 'users', user.uid, 'data', 'main');
         unsubMain = onSnapshot(userDocRef, (snap) => {
@@ -348,6 +469,9 @@ export default function App() {
             if (data.attendanceHistory) setAttendanceHistory(data.attendanceHistory);
             if (data.seatingChart) setSeatingChart(data.seatingChart);
             if (data.homeworkList) setHomeworkList(data.homeworkList as Homework[]);
+            if (data.aiChatHistory) setAiChatHistory(data.aiChatHistory);
+            if (data.termSettings) setTermSettings(data.termSettings);
+            if (data.curriculum) setCurriculum(data.curriculum);
         } else {
             setDoc(userDocRef, {
             classes: INITIAL_CLASSES,
@@ -355,12 +479,13 @@ export default function App() {
             attendanceHistory: {},
             seatingChart: {},
             homeworkList: [],
+            termSettings: INITIAL_TERM_SETTINGS,
+            curriculum: {},
             createdAt: serverTimestamp()
             });
         }
         }, (err) => {
             console.error("Private Sync Error", err);
-            // If permission denied or other error, we can stay logged in but data might not sync
         });
 
         const imgDocRef = doc(db, 'artifacts', appId, 'users', user.uid, 'data', 'images');
@@ -377,7 +502,6 @@ export default function App() {
         console.error("Setup failed", err);
     }
 
-    // ALWAYS return a cleanup function to satisfy TypeScript strict mode
     return () => {
         if (unsubMain) unsubMain();
         if (unsubImg) unsubImg();
@@ -393,11 +517,16 @@ export default function App() {
     await updateDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'data', 'main'), data);
   };
 
+  const saveImages = async (data: any) => {
+    if (isDemoMode || !user || !db) return;
+    await setDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'data', 'images'), data, { merge: true });
+  };
+
   const handleLogin = () => {
     if (passwordInput === storedPassword) {
       setIsLocked(false);
       setAuthError('');
-      setPasswordInput(''); // FIX: Clear input on successful login
+      setPasswordInput('');
     } else {
       setAuthError('Incorrect Access Code');
     }
@@ -411,12 +540,184 @@ export default function App() {
     setStoredPassword(setupPassword); 
     savePrivate({ password: setupPassword });
     setIsLocked(false);
-    setSetupPassword(''); // FIX: Clear setup input
+    setSetupPassword('');
   };
 
   const handleLock = () => {
     setIsLocked(true);
-    setPasswordInput(''); // FIX: Clear input when locking
+    setPasswordInput('');
+  };
+
+  // --- EXCEL IMPORT ---
+  const handleExcelUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (evt) => {
+      const bstr = evt.target?.result;
+      // @ts-ignore - using global SheetJS loaded from CDN
+      if (typeof window.XLSX === 'undefined') {
+        alert("Excel parser is loading, please try again in a moment.");
+        return;
+      }
+      // @ts-ignore
+      const wb = window.XLSX.read(bstr, { type: 'binary' });
+      const wsname = wb.SheetNames[0];
+      const ws = wb.Sheets[wsname];
+      // @ts-ignore
+      const data: any[] = window.XLSX.utils.sheet_to_json(ws);
+
+      // Heuristic: Check columns
+      if (!currentClass) {
+        alert("Please select a class first.");
+        return;
+      }
+
+      const newStudents: Student[] = [...currentClass.students];
+      let addedCount = 0;
+
+      data.forEach(row => {
+        // Basic "Name" column or first column
+        const name = row['Name'] || row['name'] || row['Student'] || Object.values(row)[0];
+        const performance = row['Performance'] || row['Score'] || row['Grade'] || 50; // Default 50
+
+        if (name && typeof name === 'string') {
+            const existing = newStudents.find(s => s.name.toLowerCase() === name.toLowerCase());
+            if (!existing) {
+                newStudents.push({
+                    id: Date.now() + Math.random(),
+                    name: name.trim(),
+                    performance: Number(performance) || 50
+                });
+                addedCount++;
+            } else {
+                // Update performance if student exists
+                existing.performance = Number(performance) || existing.performance;
+            }
+        }
+      });
+
+      if (addedCount > 0) {
+        const updatedClasses = classes.map(c => c.id === currentClass.id ? { ...c, students: newStudents } : c);
+        setClasses(updatedClasses);
+        savePrivate({ classes: updatedClasses });
+        alert(`Imported ${addedCount} students successfully!`);
+      } else {
+        alert("No new students found. Check your Excel columns (needs 'Name' header).");
+      }
+    };
+    reader.readAsBinaryString(file);
+  };
+
+  // --- CURRICULUM EXCEL IMPORT ---
+  const handleCurriculumUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (evt) => {
+        const bstr = evt.target?.result;
+        // @ts-ignore
+        if (typeof window.XLSX === 'undefined') {
+            alert("Excel parser is loading...");
+            return;
+        }
+        // @ts-ignore
+        const wb = window.XLSX.read(bstr, { type: 'binary' });
+        const wsname = wb.SheetNames[0];
+        const ws = wb.Sheets[wsname];
+        // @ts-ignore
+        const data: any[] = window.XLSX.utils.sheet_to_json(ws);
+
+        if (!currentClass || !activeTermId) {
+            alert("Select class and term first.");
+            return;
+        }
+
+        const newCurriculum = { ...curriculum };
+        if (!newCurriculum[selectedClassId]) newCurriculum[selectedClassId] = {};
+        if (!newCurriculum[selectedClassId][activeTermId]) newCurriculum[selectedClassId][activeTermId] = {};
+
+        let count = 0;
+        data.forEach(row => {
+            const week = row['Week'] || row['week'];
+            const topic = row['Topic'] || row['topic'] || row['Theme'];
+            const materials = row['Materials'] || row['materials'] || row['Resources'];
+
+            if (week && topic) {
+                newCurriculum[selectedClassId][activeTermId][week] = {
+                    topic: String(topic),
+                    materials: String(materials || '')
+                };
+                count++;
+            }
+        });
+
+        setCurriculum(newCurriculum);
+        savePrivate({ curriculum: newCurriculum });
+        alert(`Imported plans for ${count} weeks!`);
+    };
+    reader.readAsBinaryString(file);
+  };
+
+  // --- CLASS MANAGEMENT ACTIONS ---
+  const addClass = () => {
+    if (!newClassName.trim()) return;
+    const newClass: ClassData = {
+        id: `c${Date.now()}`,
+        name: newClassName,
+        layout: 'grid',
+        students: []
+    };
+    const updated = [...classes, newClass];
+    setClasses(updated);
+    savePrivate({ classes: updated });
+    setNewClassName('');
+    setSelectedClassId(newClass.id);
+  };
+
+  const deleteClass = (classId: string) => {
+    if (confirm('Are you sure you want to delete this class?')) {
+        const updated = classes.filter(c => c.id !== classId);
+        setClasses(updated);
+        savePrivate({ classes: updated });
+        // Safely switch selection if current class was deleted
+        if (selectedClassId === classId) {
+            setSelectedClassId(updated.length > 0 ? updated[0].id : '');
+        }
+    }
+  };
+
+  const addStudent = () => {
+    if (!newStudentName.trim() || !currentClass) return;
+    const newStudent: Student = {
+        id: Date.now(),
+        name: newStudentName,
+        performance: 50
+    };
+    const updatedClasses = classes.map(c => 
+        c.id === selectedClassId ? { ...c, students: [...c.students, newStudent] } : c
+    );
+    setClasses(updatedClasses);
+    savePrivate({ classes: updatedClasses });
+    setNewStudentName('');
+  };
+
+  const deleteStudent = (studentId: number) => {
+    const updatedClasses = classes.map(c => 
+        c.id === selectedClassId ? { ...c, students: c.students.filter(s => s.id !== studentId) } : c
+    );
+    setClasses(updatedClasses);
+    savePrivate({ classes: updatedClasses });
+  };
+
+  const updateStudentScore = (studentId: number, newScore: number) => {
+     const updatedClasses = classes.map(c => 
+        c.id === selectedClassId ? { ...c, students: c.students.map(s => s.id === studentId ? {...s, performance: newScore} : s) } : c
+    );
+    setClasses(updatedClasses);
+    savePrivate({ classes: updatedClasses });
   };
 
   const toggleAttendance = (studentId: number) => {
@@ -439,6 +740,26 @@ export default function App() {
       }
     };
     
+    setAttendanceHistory(newHistory);
+    savePrivate({ attendanceHistory: newHistory });
+  };
+
+  const markAllPresent = () => {
+    if (!currentClass) return;
+    const dateKey = currentDate.toISOString().split('T')[0];
+    const newRecords = { ...attendanceHistory[selectedClassId]?.[dateKey] };
+    
+    currentClass.students.forEach(s => {
+      newRecords[String(s.id)] = 'present';
+    });
+    
+    const newHistory = {
+        ...attendanceHistory,
+        [selectedClassId]: {
+          ...attendanceHistory[selectedClassId],
+          [dateKey]: newRecords
+        }
+    };
     setAttendanceHistory(newHistory);
     savePrivate({ attendanceHistory: newHistory });
   };
@@ -488,16 +809,85 @@ export default function App() {
     savePrivate({ homeworkList: updatedList });
   };
 
-  const generateSimpleReport = () => {
+  const handlePaste = (e: React.ClipboardEvent, type: 'weekly' | 'yearly') => {
+    const items = e.clipboardData?.items;
+    if (!items) return;
+
+    // Change for-of loop to indexed for loop to fix TS error
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i];
+      if (item.type.indexOf('image') !== -1) {
+        const blob = item.getAsFile();
+        if (blob) {
+          const reader = new FileReader();
+          reader.onload = (event) => {
+             const result = event.target?.result as string;
+             const update = { ...scheduleImages, [type]: result };
+             setScheduleImages(update);
+             saveImages(update); // Fixed: Save to Images doc, not Main doc
+          };
+          reader.readAsDataURL(blob);
+        }
+      }
+    }
+  };
+
+  const updateCurriculum = (week: number, field: 'topic' | 'materials', value: string) => {
+    const newCurriculum = { ...curriculum };
+    if (!newCurriculum[selectedClassId]) newCurriculum[selectedClassId] = {};
+    if (!newCurriculum[selectedClassId][activeTermId]) newCurriculum[selectedClassId][activeTermId] = {};
+    
+    if (!newCurriculum[selectedClassId][activeTermId][week]) {
+        newCurriculum[selectedClassId][activeTermId][week] = { topic: '', materials: '' };
+    }
+    
+    newCurriculum[selectedClassId][activeTermId][week][field] = value;
+    setCurriculum(newCurriculum);
+    savePrivate({ curriculum: newCurriculum });
+  };
+
+  // --- AI FUNCTIONS ---
+  
+  const sendAiMessage = async () => {
+    if (!aiInput.trim()) return;
+    const newUserMsg: ChatMessage = { role: 'user', text: aiInput, timestamp: Date.now() };
+    const updatedHistory = [...aiChatHistory, newUserMsg];
+    setAiChatHistory(updatedHistory);
+    setAiInput('');
+    setIsAiThinking(true);
+
+    try {
+        const responseText = await callGemini(aiInput);
+        const modelMsg: ChatMessage = { role: 'model', text: responseText, timestamp: Date.now() };
+        const finalHistory = [...updatedHistory, modelMsg];
+        setAiChatHistory(finalHistory);
+        savePrivate({ aiChatHistory: finalHistory });
+    } catch (e) {
+        // Error handled in callGemini
+    } finally {
+        setIsAiThinking(false);
+    }
+  };
+
+  const generateAiReport = async () => {
     const s = studentList.find(s => String(s.id) === reportStudentId);
     if (!s) return;
     
-    const comments = [
-        s.performance > 80 ? `${s.name} is excelling in class.` : `${s.name} is working hard but needs support.`,
-        "Participation has been consistent.",
-        `Current average: ${s.performance}%.`
-    ];
-    setGeneratedReport(comments.join("\n"));
+    setIsGeneratingReport(true);
+    try {
+        const prompt = `Write a short, professional progress report for a student named ${s.name}. 
+        Their current performance score is ${s.performance}%. 
+        Based on this score, determine if they are excelling, doing okay, or struggling. 
+        Include 2 specific sentences about their participation and potential areas for growth. 
+        Keep it under 100 words.`;
+
+        const report = await callGemini(prompt);
+        setGeneratedReport(report);
+    } catch (e) {
+        setGeneratedReport("Failed to generate AI report. Please try again.");
+    } finally {
+        setIsGeneratingReport(false);
+    }
   };
 
   const handlePrintPDF = () => {
@@ -564,8 +954,9 @@ export default function App() {
     const today = new Date().toLocaleDateString('en-US', { weekday: 'long' });
     const todaysSchedule = schedule[today] || [];
     
+    const { term: currentTerm, week: currentWeek } = getTermContext(new Date());
+
     const lastSessionAlerts: {class: string, date: string, students: string[]}[] = [];
-    
     const classHistory = attendanceHistory[selectedClassId];
     if (classHistory) {
       const dates = Object.keys(classHistory).sort().reverse();
@@ -594,7 +985,11 @@ export default function App() {
           <div className="relative z-20 p-8 md:p-10 flex flex-col md:flex-row justify-between items-center gap-6">
             <div>
               <h1 className="text-3xl font-bold mb-2">Good Morning, Teacher</h1>
-              <p className="text-indigo-100">You have <span className="font-bold text-white">{todaysSchedule.length} sessions</span> and <span className="font-bold text-white">{sharedTodos.filter(t => !t.completed).length} tasks</span> today.</p>
+              <p className="text-indigo-100">You have <span className="font-bold text-white">{todaysSchedule.length} sessions</span> today.</p>
+              <div className="flex items-center gap-2 mt-2">
+                  <span className="bg-white/20 backdrop-blur-md px-3 py-1 rounded-lg text-xs font-bold uppercase">Term {currentTerm.replace('t','')}</span>
+                  <span className="bg-white/20 backdrop-blur-md px-3 py-1 rounded-lg text-xs font-bold uppercase">Week {currentWeek}</span>
+              </div>
             </div>
             <div className="flex gap-3">
               <Button variant="secondary" size="sm" onClick={() => setActiveTab('schedule')} icon={CalendarIcon}>View Week</Button>
@@ -605,50 +1000,50 @@ export default function App() {
 
         <div className="grid lg:grid-cols-3 gap-6">
           <div className="lg:col-span-2 space-y-6">
-             {lastSessionAlerts.length > 0 && (
-               <Card className="bg-amber-50 border-amber-100 dark:bg-amber-900/20 dark:border-amber-800">
-                 <div className="flex items-start gap-4">
-                   <div className="p-3 bg-amber-100 dark:bg-amber-900 rounded-full text-amber-600 dark:text-amber-400"><AlertTriangle size={24}/></div>
-                   <div>
-                     <h3 className="text-amber-800 dark:text-amber-200 font-bold text-lg">Preparation Needed</h3>
-                     <p className="text-amber-700 dark:text-amber-300 text-sm mb-2">The following students were absent last lesson. Prepare catch-up handouts.</p>
-                     <div className="space-y-2">
-                       {lastSessionAlerts.map((alert, i) => (
-                         <div key={i} className="bg-white/60 dark:bg-black/20 p-3 rounded-lg border border-amber-100 dark:border-amber-800 text-sm">
-                           <span className="font-bold text-amber-900 dark:text-amber-100">{alert.class} ({alert.date}):</span> <span className="dark:text-slate-300">{alert.students.join(', ')}</span>
-                         </div>
-                       ))}
-                     </div>
-                   </div>
-                 </div>
-               </Card>
-             )}
-
              <div className="grid md:grid-cols-2 gap-6">
-               <Card>
+               <Card className="md:col-span-2">
                  <div className="flex items-center justify-between mb-4">
                    <h3 className="font-bold text-slate-700 dark:text-slate-200 flex items-center gap-2"><Clock className="text-indigo-500" size={20}/> Today's Plan</h3>
                    <span className="text-xs font-bold text-slate-400 uppercase">{today}</span>
                  </div>
                  <div className="space-y-3">
-                   {todaysSchedule.length > 0 ? todaysSchedule.map((evt, i) => (
-                     <div key={i} className="flex items-center gap-3 p-3 rounded-xl bg-slate-50 dark:bg-slate-700/50 hover:bg-indigo-50 dark:hover:bg-indigo-900/30 transition-colors border border-slate-100 dark:border-slate-700">
-                       <div className="text-center w-12 shrink-0">
-                         <div className="text-xs font-bold text-slate-400">{evt.time.split(' - ')[0]}</div>
-                       </div>
-                       <div className="w-1 h-8 bg-indigo-200 dark:bg-indigo-600 rounded-full" />
-                       <div>
-                         <div className="text-sm font-bold text-slate-700 dark:text-slate-200">{evt.name}</div>
-                         <div className="text-xs text-slate-500 dark:text-slate-400">{evt.code} • {evt.period}</div>
-                       </div>
-                     </div>
-                   )) : (
+                   {todaysSchedule.length > 0 ? todaysSchedule.map((evt, i) => {
+                     const lessonPlan = curriculum[evt.classId]?.[currentTerm]?.[currentWeek];
+                     return (
+                        <div key={i} className="flex flex-col gap-2 p-4 rounded-xl bg-slate-50 dark:bg-slate-700/50 hover:bg-indigo-50 dark:hover:bg-indigo-900/30 transition-colors border border-slate-100 dark:border-slate-700">
+                            <div className="flex items-center gap-3">
+                                <div className="text-center w-12 shrink-0">
+                                    <div className="text-xs font-bold text-slate-400">{evt.time.split(' - ')[0]}</div>
+                                </div>
+                                <div className="w-1 h-8 bg-indigo-200 dark:bg-indigo-600 rounded-full" />
+                                <div className="flex-1">
+                                    <div className="text-sm font-bold text-slate-700 dark:text-slate-200">{evt.name}</div>
+                                    <div className="text-xs text-slate-500 dark:text-slate-400">{evt.code} • {evt.period}</div>
+                                </div>
+                            </div>
+                            {lessonPlan && (
+                                <div className="ml-16 mt-1 p-3 bg-white dark:bg-slate-800 rounded-lg border border-slate-200 dark:border-slate-600 text-sm">
+                                    <div className="font-semibold text-indigo-600 dark:text-indigo-400 text-xs uppercase mb-1">Week {currentWeek} Topic</div>
+                                    <div className="text-slate-800 dark:text-slate-200 font-medium">{lessonPlan.topic || 'No topic set'}</div>
+                                    {lessonPlan.materials && (
+                                        <div className="mt-2 text-xs text-slate-500 flex items-start gap-1">
+                                            <Clipboard size={12} className="mt-0.5"/> Need: {lessonPlan.materials}
+                                        </div>
+                                    )}
+                                </div>
+                            )}
+                        </div>
+                     );
+                   }) : (
                      <div className="text-center py-8 text-slate-400">No classes scheduled today.</div>
                    )}
                  </div>
                </Card>
+             </div>
+          </div>
 
-               <Card>
+          <div className="space-y-6">
+            <Card>
                  <div className="flex items-center justify-between mb-4">
                    <h3 className="font-bold text-slate-700 dark:text-slate-200 flex items-center gap-2"><ListChecks className="text-emerald-500" size={20}/> Quick Tasks</h3>
                  </div>
@@ -663,23 +1058,6 @@ export default function App() {
                    ))}
                    <Button variant="ghost" size="sm" className="w-full mt-2" onClick={() => setActiveTab('todos')}>View All Tasks</Button>
                  </div>
-               </Card>
-             </div>
-          </div>
-
-          <div className="space-y-6">
-            <Card className="bg-gradient-to-b from-slate-800 to-slate-900 text-white border-none">
-              <h3 className="font-bold text-indigo-300 mb-4 flex items-center gap-2"><Bell size={18}/> Notices</h3>
-              <div className="space-y-4">
-                 <div className="bg-white/10 p-4 rounded-xl backdrop-blur-sm border border-white/10">
-                   <span className="text-[10px] font-bold bg-indigo-500 px-2 py-0.5 rounded text-white mb-2 inline-block">MEETING</span>
-                   <p className="text-sm font-medium">Staff meeting today at 16:00 in the main hall.</p>
-                 </div>
-                 <div className="bg-white/10 p-4 rounded-xl backdrop-blur-sm border border-white/10">
-                   <span className="text-[10px] font-bold bg-orange-500 px-2 py-0.5 rounded text-white mb-2 inline-block">DUTY</span>
-                   <p className="text-sm font-medium">Entrance gate greetings tomorrow morning (08:00).</p>
-                 </div>
-              </div>
             </Card>
           </div>
         </div>
@@ -687,11 +1065,233 @@ export default function App() {
     );
   };
 
+  const renderCurriculum = () => (
+    <div className="h-full flex flex-col gap-6 animate-in fade-in">
+        <div className="flex justify-between items-start">
+            <div>
+                <h2 className="text-2xl font-bold text-slate-800 dark:text-white flex items-center gap-2"><BookOpenCheck className="text-indigo-500"/> Curriculum Planner</h2>
+                <p className="text-slate-500 text-sm">Manage term dates and weekly lesson plans.</p>
+            </div>
+            <div className="flex gap-2">
+                <label className="cursor-pointer bg-indigo-50 dark:bg-indigo-900/20 text-indigo-700 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-800 hover:bg-indigo-100 px-4 py-2 rounded-xl text-sm font-bold flex items-center gap-2 transition-colors">
+                    <FileSpreadsheet size={16}/>
+                    Import Excel Plan
+                    <input type="file" accept=".xlsx, .xls" className="hidden" onChange={handleCurriculumUpload} />
+                </label>
+            </div>
+        </div>
+
+        <Card className="bg-slate-50 dark:bg-slate-900 border-slate-200 dark:border-slate-700">
+            <h3 className="font-bold text-sm uppercase text-slate-500 mb-3">Term Start Dates</h3>
+            <div className="grid grid-cols-3 gap-4">
+                {(['t1', 't2', 't3'] as const).map(t => (
+                    <div key={t}>
+                        <label className="text-xs font-bold text-slate-400 block mb-1 uppercase">Term {t.replace('t','')}</label>
+                        <input 
+                            type="date" 
+                            className="w-full p-2 rounded-lg border border-slate-200 dark:border-slate-600 dark:bg-slate-800 dark:text-white text-sm"
+                            value={termSettings[t]}
+                            onChange={e => {
+                                const newSettings = { ...termSettings, [t]: e.target.value };
+                                setTermSettings(newSettings);
+                                savePrivate({ termSettings: newSettings });
+                            }}
+                        />
+                    </div>
+                ))}
+            </div>
+        </Card>
+
+        <div className="flex-1 flex flex-col lg:flex-row gap-6 overflow-hidden">
+            {/* Left: Selection */}
+            <div className="w-full lg:w-64 space-y-4">
+                <Card className="h-full">
+                    <div className="space-y-4">
+                        <div>
+                            <label className="text-xs font-bold text-slate-500 block mb-2">Select Class</label>
+                            <select 
+                                className="w-full p-2 rounded-lg border border-slate-200 dark:border-slate-600 dark:bg-slate-800 dark:text-white"
+                                value={selectedClassId}
+                                onChange={e => setSelectedClassId(e.target.value)}
+                            >
+                                {classes.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                            </select>
+                        </div>
+                        <div>
+                            <label className="text-xs font-bold text-slate-500 block mb-2">Select Term</label>
+                            <div className="flex gap-2">
+                                {(['t1', 't2', 't3'] as const).map(t => (
+                                    <button 
+                                        key={t}
+                                        onClick={() => setActiveTermId(t)}
+                                        className={`flex-1 py-2 rounded-lg text-sm font-bold border transition-all ${activeTermId === t ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 border-slate-200 dark:border-slate-600'}`}
+                                    >
+                                        {t.toUpperCase()}
+                                    </button>
+                                ))}
+                            </div>
+                        </div>
+                    </div>
+                </Card>
+            </div>
+
+            {/* Right: Editor */}
+            <div className="flex-1 overflow-y-auto space-y-4 pb-10">
+                <h3 className="font-bold text-slate-700 dark:text-slate-200">
+                    {activeTermId.toUpperCase()} Plan for {classes.find(c => c.id === selectedClassId)?.name}
+                </h3>
+                {Array.from({ length: 12 }).map((_, i) => {
+                    const weekNum = i + 1;
+                    const plan = curriculum[selectedClassId]?.[activeTermId]?.[weekNum] || { topic: '', materials: '' };
+                    return (
+                        <Card key={weekNum} noPadding className="flex flex-col md:flex-row">
+                            <div className="bg-slate-100 dark:bg-slate-900/50 p-4 flex items-center justify-center border-r border-slate-100 dark:border-slate-700 w-24 shrink-0">
+                                <span className="font-bold text-slate-400">Week {weekNum}</span>
+                            </div>
+                            <div className="flex-1 p-4 grid md:grid-cols-2 gap-4">
+                                <div>
+                                    <label className="text-[10px] font-bold text-slate-400 uppercase block mb-1">Topic / Theme</label>
+                                    <input 
+                                        className="w-full bg-transparent border-b border-slate-200 dark:border-slate-700 focus:border-indigo-500 outline-none py-1 dark:text-white"
+                                        placeholder="e.g. Introduction to Era..."
+                                        value={plan.topic}
+                                        onChange={e => updateCurriculum(weekNum, 'topic', e.target.value)}
+                                    />
+                                </div>
+                                <div>
+                                    <label className="text-[10px] font-bold text-slate-400 uppercase block mb-1">Materials Needed</label>
+                                    <input 
+                                        className="w-full bg-transparent border-b border-slate-200 dark:border-slate-700 focus:border-indigo-500 outline-none py-1 dark:text-white"
+                                        placeholder="e.g. Textbook p.40, Map..."
+                                        value={plan.materials}
+                                        onChange={e => updateCurriculum(weekNum, 'materials', e.target.value)}
+                                    />
+                                </div>
+                            </div>
+                        </Card>
+                    );
+                })}
+            </div>
+        </div>
+    </div>
+  );
+
+  const renderClassManager = () => (
+    <div className="grid lg:grid-cols-12 gap-6 animate-in fade-in h-full">
+        {/* Left Panel: Class List */}
+        <div className="lg:col-span-4 flex flex-col gap-6">
+            <Card className="flex-1 flex flex-col">
+                <h3 className="font-bold text-xl text-slate-800 dark:text-white mb-6 flex items-center gap-2"><Settings className="text-indigo-500"/> Manage Classes</h3>
+                
+                <div className="flex gap-2 mb-6">
+                    <input 
+                        className="flex-1 p-2 bg-slate-50 dark:bg-slate-700 border border-slate-200 dark:border-slate-600 rounded-lg text-sm outline-none dark:text-white"
+                        placeholder="New Class Name"
+                        value={newClassName}
+                        onChange={e => setNewClassName(e.target.value)}
+                    />
+                    <Button onClick={addClass} size="sm" variant="primary" icon={Plus} disabled={!newClassName}>Add</Button>
+                </div>
+
+                <div className="flex-1 overflow-y-auto space-y-2">
+                    {classes.map(c => (
+                        <div key={c.id} 
+                             onClick={() => setSelectedClassId(c.id)}
+                             className={`p-3 rounded-xl border cursor-pointer transition-all flex justify-between items-center ${selectedClassId === c.id ? 'bg-indigo-50 border-indigo-200 dark:bg-indigo-900/30 dark:border-indigo-700 ring-1 ring-indigo-200' : 'bg-white dark:bg-slate-800 border-slate-100 dark:border-slate-700 hover:bg-slate-50'}`}>
+                            <div>
+                                <div className="font-bold text-slate-700 dark:text-slate-200">{c.name}</div>
+                                <div className="text-xs text-slate-500">{c.students.length} Students</div>
+                            </div>
+                            <button onClick={(e) => { e.stopPropagation(); deleteClass(c.id); }} className="text-slate-400 hover:text-red-500 p-2">
+                                <Trash2 size={16}/>
+                            </button>
+                        </div>
+                    ))}
+                    {classes.length === 0 && (
+                        <div className="text-center p-4 text-slate-400 text-sm">
+                            No classes yet. Add one to get started.
+                        </div>
+                    )}
+                </div>
+            </Card>
+        </div>
+
+        {/* Right Panel: Student List & Excel Import */}
+        <div className="lg:col-span-8 flex flex-col gap-6 h-full">
+             <Card className="flex-1 flex flex-col h-full">
+                <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 mb-6 pb-4 border-b border-slate-100 dark:border-slate-700">
+                    <div>
+                        <h3 className="font-bold text-lg text-slate-800 dark:text-white">{currentClass?.name} Students</h3>
+                        <p className="text-xs text-slate-500">Manage student roster for this class</p>
+                    </div>
+                    <div className="flex gap-2">
+                        <label className="cursor-pointer bg-emerald-50 dark:bg-emerald-900/20 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800 hover:bg-emerald-100 px-4 py-2 rounded-xl text-sm font-bold flex items-center gap-2 transition-colors">
+                            <FileSpreadsheet size={16}/>
+                            Import Excel
+                            <input type="file" accept=".xlsx, .xls" className="hidden" onChange={handleExcelUpload} />
+                        </label>
+                    </div>
+                </div>
+
+                <div className="flex gap-2 mb-4">
+                     <input 
+                        className="flex-1 p-2 bg-slate-50 dark:bg-slate-700 border border-slate-200 dark:border-slate-600 rounded-lg text-sm outline-none dark:text-white"
+                        placeholder="Student Name"
+                        value={newStudentName}
+                        onChange={e => setNewStudentName(e.target.value)}
+                        onKeyDown={e => e.key === 'Enter' && addStudent()}
+                    />
+                    <Button onClick={addStudent} size="sm" variant="secondary" icon={Plus} disabled={!newStudentName}>Add Student</Button>
+                </div>
+
+                <div className="flex-1 overflow-y-auto">
+                    <table className="w-full text-sm text-left">
+                        <thead className="text-xs text-slate-500 uppercase bg-slate-50 dark:bg-slate-700/50 dark:text-slate-400 sticky top-0">
+                            <tr>
+                                <th className="px-4 py-3 rounded-tl-lg">Name</th>
+                                <th className="px-4 py-3 text-center">Perf %</th>
+                                <th className="px-4 py-3 text-right rounded-tr-lg">Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100 dark:divide-slate-700">
+                            {studentList.map(s => (
+                                <tr key={s.id} className="hover:bg-slate-50 dark:hover:bg-slate-800/50 group">
+                                    <td className="px-4 py-3 font-medium text-slate-700 dark:text-slate-200">{s.name}</td>
+                                    <td className="px-4 py-3 text-center">
+                                        <input 
+                                            type="number" 
+                                            className="w-12 text-center bg-transparent border-b border-transparent focus:border-indigo-500 outline-none"
+                                            value={s.performance}
+                                            onChange={(e) => updateStudentScore(s.id, Number(e.target.value))}
+                                        />
+                                    </td>
+                                    <td className="px-4 py-3 text-right">
+                                        <button onClick={() => deleteStudent(s.id)} className="text-slate-400 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity">
+                                            <Trash2 size={16}/>
+                                        </button>
+                                    </td>
+                                </tr>
+                            ))}
+                            {studentList.length === 0 && (
+                                <tr>
+                                    <td colSpan={3} className="px-4 py-8 text-center text-slate-400 italic">
+                                        No students in this class yet. Add manually or import Excel.
+                                    </td>
+                                </tr>
+                            )}
+                        </tbody>
+                    </table>
+                </div>
+             </Card>
+        </div>
+    </div>
+  );
+
   const renderReportGen = () => (
     <div className="grid lg:grid-cols-12 gap-6 animate-in fade-in h-full">
         <div className="lg:col-span-4 flex flex-col gap-6">
             <Card className="flex-1 flex flex-col">
-                <h3 className="font-bold text-xl text-slate-800 dark:text-white mb-6">Report Generator</h3>
+                <h3 className="font-bold text-xl text-slate-800 dark:text-white mb-6 flex items-center gap-2"><Sparkles className="text-indigo-500"/> AI Report Writer</h3>
                 <div className="space-y-4 flex-1">
                     <div>
                         <label className="text-xs font-bold text-slate-500 uppercase mb-1 block">Select Student</label>
@@ -700,7 +1300,12 @@ export default function App() {
                             {studentList.map(s => <option key={s.id} value={String(s.id)}>{s.name}</option>)}
                         </select>
                     </div>
-                    <Button onClick={generateSimpleReport} disabled={!reportStudentId} icon={FileText} className="w-full">Generate Draft</Button>
+                    <div className="bg-indigo-50 dark:bg-indigo-900/20 p-4 rounded-xl text-xs text-indigo-800 dark:text-indigo-200 leading-relaxed">
+                        <p><strong>How it works:</strong> The AI analyzes the student's performance score ({studentList.find(s => String(s.id) === reportStudentId)?.performance || '-'}%) and generates a personalized progress comment suitable for report cards.</p>
+                    </div>
+                    <Button onClick={generateAiReport} disabled={!reportStudentId || isGeneratingReport} icon={Sparkles} variant="ai" className="w-full">
+                        {isGeneratingReport ? 'Generating...' : 'Generate Report'}
+                    </Button>
                 </div>
             </Card>
         </div>
@@ -716,8 +1321,8 @@ export default function App() {
                     )}
                 </div>
                 <textarea 
-                    className="flex-1 w-full p-6 bg-slate-50 dark:bg-slate-900/50 border border-slate-200 dark:border-slate-700 rounded-xl resize-none outline-none font-serif leading-relaxed text-slate-700 dark:text-slate-300" 
-                    placeholder="Report content will appear here..." 
+                    className="flex-1 w-full p-6 bg-slate-50 dark:bg-slate-900/50 border border-slate-200 dark:border-slate-700 rounded-xl resize-none outline-none font-serif leading-relaxed text-slate-700 dark:text-slate-300 shadow-inner" 
+                    placeholder="Generated report content will appear here..." 
                     value={generatedReport} 
                     onChange={e => setGeneratedReport(e.target.value)}
                 />
@@ -726,12 +1331,63 @@ export default function App() {
     </div>
   );
 
+  const renderAiChat = () => (
+     <div className="h-full flex flex-col gap-4 animate-in fade-in">
+        <div className="flex justify-between items-center">
+            <div>
+                <h2 className="text-2xl font-bold text-slate-800 dark:text-white flex items-center gap-2"><Sparkles className="text-purple-500"/> AI Assistant</h2>
+                <p className="text-slate-500 text-sm">Ask for lesson plans, email drafts, or classroom advice.</p>
+            </div>
+            <Button variant="secondary" size="sm" onClick={() => {
+                setAiChatHistory([{ role: 'model', text: "Hello! I'm your teaching assistant. How can I help you today?", timestamp: Date.now() }]);
+                savePrivate({ aiChatHistory: [] });
+            }} icon={Trash2}>Clear Chat</Button>
+        </div>
+
+        <Card className="flex-1 flex flex-col p-0 overflow-hidden bg-slate-50 dark:bg-slate-900 border-none">
+            <div className="flex-1 overflow-y-auto p-6 space-y-4">
+                {aiChatHistory.map((msg, idx) => (
+                    <div key={idx} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                        <div className={`max-w-[80%] p-4 rounded-2xl text-sm leading-relaxed shadow-sm ${
+                            msg.role === 'user' 
+                            ? 'bg-indigo-600 text-white rounded-br-none' 
+                            : 'bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 border border-slate-200 dark:border-slate-700 rounded-bl-none'
+                        }`}>
+                            {msg.text}
+                        </div>
+                    </div>
+                ))}
+                {isAiThinking && (
+                    <div className="flex justify-start">
+                         <div className="bg-white dark:bg-slate-800 p-4 rounded-2xl rounded-bl-none border border-slate-200 dark:border-slate-700 flex items-center gap-2">
+                             <div className="w-2 h-2 bg-purple-400 rounded-full animate-bounce"/>
+                             <div className="w-2 h-2 bg-purple-400 rounded-full animate-bounce delay-75"/>
+                             <div className="w-2 h-2 bg-purple-400 rounded-full animate-bounce delay-150"/>
+                         </div>
+                    </div>
+                )}
+                <div ref={chatEndRef} />
+            </div>
+            <div className="p-4 bg-white dark:bg-slate-800 border-t border-slate-200 dark:border-slate-700 flex gap-2">
+                <input 
+                    className="flex-1 bg-slate-100 dark:bg-slate-700/50 border border-slate-200 dark:border-slate-600 rounded-xl px-4 outline-none focus:ring-2 focus:ring-indigo-500 dark:text-white"
+                    placeholder="Ask Gemini anything..."
+                    value={aiInput}
+                    onChange={e => setAiInput(e.target.value)}
+                    onKeyDown={e => e.key === 'Enter' && sendAiMessage()}
+                />
+                <Button onClick={sendAiMessage} variant="primary" icon={Send} disabled={!aiInput || isAiThinking}>Send</Button>
+            </div>
+        </Card>
+     </div>
+  );
+
   const renderAttendance = () => (
     <div className="h-full flex flex-col space-y-6 animate-in fade-in slide-in-from-bottom-4">
       <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
         <div>
           <h2 className="text-2xl font-bold text-slate-800 dark:text-white">Attendance Tracker</h2>
-          <p className="text-slate-500 dark:text-slate-400 text-sm">Tap status button to toggle: Present → Absent → Late</p>
+          <p className="text-slate-500 dark:text-slate-400 text-sm">Tap card to toggle: <span className="text-emerald-600 font-bold">Present</span> → <span className="text-red-600 font-bold">Absent</span> → <span className="text-amber-600 font-bold">Late</span></p>
         </div>
         <div className="flex items-center gap-3 bg-white dark:bg-slate-800 p-2 rounded-xl shadow-sm border border-slate-200 dark:border-slate-700">
            <select className="bg-transparent font-bold text-slate-700 dark:text-slate-200 text-sm outline-none cursor-pointer" 
@@ -741,51 +1397,48 @@ export default function App() {
            <div className="w-px h-6 bg-slate-200 dark:bg-slate-600"></div>
            <input type="date" className="bg-transparent font-medium text-slate-600 dark:text-slate-300 text-sm outline-none cursor-pointer" 
              value={currentDate.toISOString().split('T')[0]} onChange={e => setCurrentDate(new Date(e.target.value))} />
+            <Button size="sm" variant="primary" onClick={markAllPresent} icon={CheckCircle}>Mark All Present</Button>
         </div>
       </div>
 
-      <Card className="flex-1 p-0 overflow-hidden flex flex-col">
-        <div className="bg-slate-50 dark:bg-slate-700 border-b border-slate-200 dark:border-slate-600 p-4 grid grid-cols-12 gap-4 font-bold text-xs text-slate-500 dark:text-slate-300 uppercase tracking-wider">
-          <div className="col-span-6 md:col-span-4">Student</div>
-          <div className="col-span-3 md:col-span-4 text-center">Status</div>
-          <div className="col-span-3 md:col-span-4 text-right">Performance</div>
-        </div>
-        <div className="overflow-y-auto flex-1 p-2">
-          {studentList.map(student => {
-            const status = currentAttendance[String(student.id)] || 'present';
-            const statusStyles = {
-              present: "bg-emerald-100 dark:bg-emerald-900/40 text-emerald-700 dark:text-emerald-400 border-emerald-200 dark:border-emerald-800 hover:bg-emerald-200",
-              absent: "bg-red-100 dark:bg-red-900/40 text-red-700 dark:text-red-400 border-red-200 dark:border-red-800 hover:bg-red-200",
-              late: "bg-amber-100 dark:bg-amber-900/40 text-amber-700 dark:text-amber-400 border-amber-200 dark:border-amber-800 hover:bg-amber-200"
-            };
+      <div className="flex-1 overflow-y-auto p-1">
+        {studentList.length === 0 ? (
+            <div className="h-full flex items-center justify-center text-slate-400">No students in this class.</div>
+        ) : (
+            <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4">
+            {studentList.map(student => {
+                const status = currentAttendance[String(student.id)] || 'present';
+                const statusStyles = {
+                present: "bg-emerald-100 dark:bg-emerald-900/30 border-emerald-200 dark:border-emerald-800 ring-emerald-500",
+                absent: "bg-red-100 dark:bg-red-900/30 border-red-200 dark:border-red-800 ring-red-500",
+                late: "bg-amber-100 dark:bg-amber-900/30 border-amber-200 dark:border-amber-800 ring-amber-500"
+                };
+                const textStyles = {
+                    present: "text-emerald-800 dark:text-emerald-200",
+                    absent: "text-red-800 dark:text-red-200",
+                    late: "text-amber-800 dark:text-amber-200"
+                }
 
-            return (
-              <div key={student.id} className="grid grid-cols-12 gap-4 items-center p-3 hover:bg-slate-50 dark:hover:bg-slate-700/50 rounded-xl transition-colors border border-transparent hover:border-slate-100 dark:hover:border-slate-700">
-                <div className="col-span-6 md:col-span-4 flex items-center gap-3">
-                  <Avatar name={student.name} size="md" />
-                  <div>
-                    <div className="font-bold text-slate-700 dark:text-slate-200 text-sm">{student.name}</div>
-                    <div className="text-xs text-slate-400">ID: {student.id}</div>
-                  </div>
-                </div>
-                <div className="col-span-3 md:col-span-4 flex justify-center">
-                  <button 
+                return (
+                <button 
+                    key={student.id} 
                     onClick={() => toggleAttendance(student.id)}
-                    className={`w-28 py-1.5 rounded-lg text-xs font-bold uppercase tracking-wide border transition-all active:scale-95 ${statusStyles[status]}`}
-                  >
-                    {status}
-                  </button>
-                </div>
-                <div className="col-span-3 md:col-span-4 flex justify-end">
-                  <div className={`text-sm font-bold ${student.performance < 60 ? 'text-red-500' : 'text-slate-600 dark:text-slate-400'}`}>
-                    {student.performance}%
-                  </div>
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      </Card>
+                    className={`relative p-4 rounded-2xl border-2 transition-all duration-200 active:scale-95 flex flex-col items-center justify-center gap-3 shadow-sm hover:shadow-md ${statusStyles[status]}`}
+                >
+                    <Avatar name={student.name} size="lg" className="shadow-md"/>
+                    <div className="text-center">
+                        <div className={`font-bold text-sm line-clamp-1 ${textStyles[status]}`}>{student.name}</div>
+                        <div className="text-[10px] font-bold uppercase tracking-widest opacity-60">{status}</div>
+                    </div>
+                    {status !== 'present' && (
+                        <div className={`absolute top-2 right-2 w-3 h-3 rounded-full ${status === 'absent' ? 'bg-red-500' : 'bg-amber-500'}`}/>
+                    )}
+                </button>
+                );
+            })}
+            </div>
+        )}
+      </div>
     </div>
   );
 
@@ -1045,12 +1698,17 @@ export default function App() {
      <div className="space-y-6 animate-in fade-in">
         <div className="flex justify-between items-center">
           <h2 className="text-2xl font-bold text-slate-800 dark:text-white">Class Schedule</h2>
-          <p className="text-sm text-slate-500 dark:text-slate-400">Upload screenshots of your timetable for quick reference.</p>
+          <p className="text-sm text-slate-500 dark:text-slate-400">Upload screenshots of your timetable or click a box and <span className="font-bold text-indigo-500">Ctrl+V</span> to paste.</p>
         </div>
         
         <div className="grid lg:grid-cols-2 gap-6">
            {(['weekly', 'yearly'] as const).map(type => (
-             <Card key={type} className="h-[600px] flex flex-col p-0">
+             <Card 
+                key={type} 
+                className="h-[600px] flex flex-col p-0" 
+                tabIndex={0}
+                onPaste={(e) => handlePaste(e, type)}
+             >
                <div className="p-4 border-b border-slate-100 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/50 flex justify-between items-center">
                  <h3 className="font-bold text-slate-700 dark:text-slate-200 capitalize">{type} Calendar</h3>
                  <div className="flex items-center gap-2">
@@ -1063,7 +1721,7 @@ export default function App() {
                            reader.onloadend = () => {
                              const update = { ...scheduleImages, [type]: reader.result as string };
                              setScheduleImages(update);
-                             savePrivate(update);
+                             saveImages(update); // Fixed: Save to Images doc, not Main doc
                            };
                            reader.readAsDataURL(file);
                         }
@@ -1071,20 +1729,20 @@ export default function App() {
                     </label>
                     {scheduleImages[type] && user && (
                       <button onClick={() => {
-                         const update = { ...scheduleImages, [type]: null };
-                         setScheduleImages(update);
-                         savePrivate(update);
+                          const update = { ...scheduleImages, [type]: null };
+                          setScheduleImages(update);
+                          saveImages(update); // Fixed: Save to Images doc, not Main doc
                       }} className="text-slate-400 hover:text-red-500 p-1"><Trash2 size={16}/></button>
                     )}
                  </div>
                </div>
-               <div className="flex-1 bg-slate-200/50 dark:bg-slate-900/50 flex items-center justify-center overflow-hidden relative group">
+               <div className="flex-1 bg-slate-200/50 dark:bg-slate-900/50 flex items-center justify-center overflow-hidden relative group outline-none">
                  {scheduleImages[type] ? (
                    <img src={scheduleImages[type]!} className="w-full h-full object-contain" alt={type}/>
                  ) : (
                    <div className="text-center text-slate-400">
                      <ImageIcon size={48} className="mx-auto mb-4 opacity-20"/>
-                     <p className="font-medium">No image uploaded</p>
+                     <p className="font-medium">Click here & Press Ctrl+V</p>
                    </div>
                  )}
                </div>
@@ -1101,12 +1759,15 @@ export default function App() {
 
   const navigation = [
     { id: 'dashboard', label: 'Dashboard', icon: LayoutGrid },
+    { id: 'curriculum', label: 'Curriculum Plans', icon: BookOpenCheck }, // NEW
+    { id: 'classes', label: 'Manage Classes', icon: Settings }, 
     { id: 'schedule', label: 'Schedule', icon: CalendarIcon },
     { id: 'attendance', label: 'Attendance', icon: CheckSquare },
     { id: 'seating', label: 'Seating Plan', icon: Users },
     { id: 'homework', label: 'Homework', icon: Book },
     { id: 'plickers', label: 'Data Analysis', icon: BarChart2 },
     { id: 'report', label: 'Report Gen', icon: FileText },
+    { id: 'ai_assistant', label: 'AI Assistant', icon: Sparkles }, 
   ];
 
   return (
@@ -1120,7 +1781,7 @@ export default function App() {
           <span className="font-bold text-lg tracking-tight text-slate-800 dark:text-white">TeacherAssistant</span>
         </div>
         
-        <nav className="p-4 space-y-1">
+        <nav className="p-4 space-y-1 overflow-y-auto max-h-[calc(100vh-200px)]">
           {navigation.map(item => (
             <button 
               key={item.id}
@@ -1137,23 +1798,23 @@ export default function App() {
           ))}
         </nav>
 
-        <div className="absolute bottom-0 left-0 right-0 p-4 border-t border-slate-100 dark:border-slate-700 space-y-4">
+        <div className="absolute bottom-0 left-0 right-0 p-4 border-t border-slate-100 dark:border-slate-700 space-y-4 bg-white dark:bg-slate-800">
           <button onClick={() => setIsDarkMode(!isDarkMode)} className="w-full flex items-center justify-between px-4 py-2 bg-slate-100 dark:bg-slate-700 rounded-xl text-xs font-bold text-slate-600 dark:text-slate-300">
-             <span>{isDarkMode ? 'Dark Mode' : 'Light Mode'}</span>
-             {isDarkMode ? <Moon size={14}/> : <Sun size={14}/>}
+              <span>{isDarkMode ? 'Dark Mode' : 'Light Mode'}</span>
+              {isDarkMode ? <Moon size={14}/> : <Sun size={14}/>}
           </button>
 
           <div className="bg-slate-50 dark:bg-slate-700/50 p-4 rounded-xl border border-slate-200 dark:border-slate-600">
-             <div className="flex items-center gap-3 mb-3">
-               <div className="w-8 h-8 rounded-full bg-slate-200 dark:bg-slate-600 flex items-center justify-center font-bold text-xs text-slate-600 dark:text-slate-300">
-                 {user.uid?.slice(0,2).toUpperCase() || 'TE'}
-               </div>
-               <div className="flex-1 overflow-hidden">
-                 <div className="text-xs font-bold text-slate-800 dark:text-white truncate">Teacher Admin</div>
-                 <div className="text-[10px] text-slate-500 dark:text-slate-400 truncate">{isDemoMode ? 'Demo Mode' : 'Live Data'}</div>
-               </div>
-             </div>
-             <Button variant="secondary" size="sm" className="w-full" icon={Lock} onClick={handleLock}>Lock System</Button>
+              <div className="flex items-center gap-3 mb-3">
+                <div className="w-8 h-8 rounded-full bg-slate-200 dark:bg-slate-600 flex items-center justify-center font-bold text-xs text-slate-600 dark:text-slate-300">
+                  {user.uid?.slice(0,2).toUpperCase() || 'TE'}
+                </div>
+                <div className="flex-1 overflow-hidden">
+                  <div className="text-xs font-bold text-slate-800 dark:text-white truncate">Teacher Admin</div>
+                  <div className="text-[10px] text-slate-500 dark:text-slate-400 truncate">{isDemoMode ? 'Demo Mode' : 'Live Data'}</div>
+                </div>
+              </div>
+              <Button variant="secondary" size="sm" className="w-full" icon={Lock} onClick={handleLock}>Lock System</Button>
           </div>
         </div>
       </aside>
@@ -1173,12 +1834,15 @@ export default function App() {
         <div className="flex-1 overflow-auto p-4 lg:p-8">
           <div className="max-w-7xl mx-auto h-full">
             {activeTab === 'dashboard' && renderDashboard()}
+            {activeTab === 'curriculum' && renderCurriculum()}
+            {activeTab === 'classes' && renderClassManager()} 
             {activeTab === 'attendance' && renderAttendance()}
             {activeTab === 'seating' && renderSeating()}
             {activeTab === 'homework' && renderHomework()}
             {activeTab === 'plickers' && renderPlickers()}
             {activeTab === 'schedule' && renderSchedule()}
             {activeTab === 'report' && renderReportGen()}
+            {activeTab === 'ai_assistant' && renderAiChat()} 
           </div>
         </div>
       </main>
