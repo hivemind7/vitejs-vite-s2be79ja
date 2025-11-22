@@ -11,7 +11,7 @@ import {
 
 // --- FIREBASE IMPORTS ---
 import { initializeApp, FirebaseApp } from 'firebase/app';
-import { getAnalytics, Analytics } from "firebase/analytics"; // Added Analytics
+import { getAnalytics, Analytics } from "firebase/analytics"; 
 import { 
   getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged, User, Auth
 } from 'firebase/auth';
@@ -85,7 +85,7 @@ const appId = typeof __app_id !== 'undefined' && __app_id ? __app_id : 'global-l
 
 // YOUR REAL CONFIGURATION
 const firebaseConfig = {
-  apiKey: "AAIzaSyAWQg_QaPJbcoDtWywzaB7E-hfmwXrOFeM",
+  apiKey: "AIzaSyAWQg_QaPJbcoDtWywzaB7E-hfmwXrOFeM",
   authDomain: "global-learning-248f6.firebaseapp.com",
   projectId: "global-learning-248f6",
   storageBucket: "global-learning-248f6.firebasestorage.app",
@@ -102,13 +102,17 @@ let analytics: Analytics | undefined;
 let isDemoMode = false; 
 
 try {
+    // Ensure apiKey is present and valid before initializing
+    if (!firebaseConfig.apiKey || firebaseConfig.apiKey.length < 10) {
+        throw new Error("Invalid or missing API Key");
+    }
     app = initializeApp(firebaseConfig);
     auth = getAuth(app);
     db = getFirestore(app);
     analytics = getAnalytics(app);
 } catch (e) {
   console.warn("Firebase initialization failed. Running in DEMO MODE.", e);
-  isDemoMode = true; // Fallback if something goes wrong (e.g. network block)
+  isDemoMode = true;
 }
 
 // --- MOCK DATA ---
@@ -216,7 +220,7 @@ const Avatar: React.FC<AvatarProps> = ({ name, size = "md", className = "" }) =>
 
 export default function App() {
   // Auth State
-  const [user, setUser] = useState<any | null>(null);
+  const [user, setUser] = useState<User | null>(null);
   const [isAuthLoading, setIsAuthLoading] = useState(true);
   const [authError, setAuthError] = useState('');
 
@@ -232,6 +236,7 @@ export default function App() {
   // Data States
   const [classes, setClasses] = useState<ClassData[]>(INITIAL_CLASSES);
   const [schedule, setSchedule] = useState<Record<string, ScheduleEntry[]>>(INITIAL_SCHEDULE);
+  // Record<ClassId, Record<Date, Record<StudentId, Status>>>
   const [attendanceHistory, setAttendanceHistory] = useState<Record<string, Record<string, Record<string, AttendanceStatus>>>>({}); 
   const [seatingChart, setSeatingChart] = useState<Record<string, (number | undefined)[]>>({});
   const [homeworkList, setHomeworkList] = useState<Homework[]>([]);
@@ -274,30 +279,48 @@ export default function App() {
     }
   }, [isDarkMode]);
 
+  // Reset password input when locked
+  useEffect(() => {
+    if (isLocked) {
+      setPasswordInput('');
+    }
+  }, [isLocked]);
+
   // Auth Init
   useEffect(() => {
+    // If we defaulted to demo mode initially, just set the fake user
     if (isDemoMode) {
       setTimeout(() => {
-        setUser({ uid: 'demo-teacher', email: 'teacher@demo.com' });
+        setUser({ uid: 'demo-teacher', email: 'teacher@demo.com' } as User);
         setIsAuthLoading(false);
       }, 800);
       return;
     }
 
+    // Attempt connection
     const initAuth = async () => {
       if (!auth) return;
-      if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-        await signInWithCustomToken(auth, __initial_auth_token);
-      } else {
-        await signInAnonymously(auth);
+      try {
+        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+          await signInWithCustomToken(auth, __initial_auth_token);
+        } else {
+          await signInAnonymously(auth);
+        }
+      } catch (error) {
+        console.error("Auth connection failed, falling back to demo mode", error);
+        // Fallback to demo user if connection fails (e.g. bad API key or network)
+        setUser({ uid: 'demo-teacher', email: 'teacher@demo.com' } as User);
+        setIsAuthLoading(false);
       }
     };
     initAuth();
     
     if (auth) {
       const unsubscribe = onAuthStateChanged(auth, (u) => {
-        setUser(u);
-        setIsAuthLoading(false);
+        if (u) {
+            setUser(u);
+            setIsAuthLoading(false);
+        }
       });
       return () => unsubscribe();
     }
@@ -306,41 +329,60 @@ export default function App() {
 
   // Data Sync
   useEffect(() => {
-    if (!user || isDemoMode || !db) return;
+    // If we can't sync, just return a no-op cleanup function
+    if (!user || isDemoMode || !db) return () => {};
 
-    const userDocRef = doc(db, 'artifacts', appId, 'users', user.uid, 'data', 'main');
-    const unsubMain = onSnapshot(userDocRef, (snap) => {
-      if (snap.exists()) {
-        const data = snap.data();
-        if (data.password) setStoredPassword(data.password);
-        if (data.classes) setClasses(data.classes as ClassData[]);
-        if (data.schedule) setSchedule(data.schedule as Record<string, ScheduleEntry[]>);
-        if (data.attendanceHistory) setAttendanceHistory(data.attendanceHistory);
-        if (data.seatingChart) setSeatingChart(data.seatingChart);
-        if (data.homeworkList) setHomeworkList(data.homeworkList as Homework[]);
-      } else {
-        setDoc(userDocRef, {
-          classes: INITIAL_CLASSES,
-          schedule: INITIAL_SCHEDULE,
-          attendanceHistory: {},
-          seatingChart: {},
-          homeworkList: [],
-          createdAt: serverTimestamp()
+    let unsubMain: (() => void) | undefined;
+    let unsubImg: (() => void) | undefined;
+    let unsubTodos: (() => void) | undefined;
+
+    // We wrap this in a try-catch to prevent crashes if Firestore is locked
+    try {
+        const userDocRef = doc(db, 'artifacts', appId, 'users', user.uid, 'data', 'main');
+        unsubMain = onSnapshot(userDocRef, (snap) => {
+        if (snap.exists()) {
+            const data = snap.data();
+            if (data.password) setStoredPassword(data.password);
+            if (data.classes) setClasses(data.classes as ClassData[]);
+            if (data.schedule) setSchedule(data.schedule as Record<string, ScheduleEntry[]>);
+            if (data.attendanceHistory) setAttendanceHistory(data.attendanceHistory);
+            if (data.seatingChart) setSeatingChart(data.seatingChart);
+            if (data.homeworkList) setHomeworkList(data.homeworkList as Homework[]);
+        } else {
+            setDoc(userDocRef, {
+            classes: INITIAL_CLASSES,
+            schedule: INITIAL_SCHEDULE,
+            attendanceHistory: {},
+            seatingChart: {},
+            homeworkList: [],
+            createdAt: serverTimestamp()
+            });
+        }
+        }, (err) => {
+            console.error("Private Sync Error", err);
+            // If permission denied or other error, we can stay logged in but data might not sync
         });
-      }
-    }, (err) => console.error("Private Sync Error", err));
 
-    const imgDocRef = doc(db, 'artifacts', appId, 'users', user.uid, 'data', 'images');
-    const unsubImg = onSnapshot(imgDocRef, (snap) => {
-      if (snap.exists()) setScheduleImages(snap.data() as { weekly: string | null, yearly: string | null });
-    });
+        const imgDocRef = doc(db, 'artifacts', appId, 'users', user.uid, 'data', 'images');
+        unsubImg = onSnapshot(imgDocRef, (snap) => {
+        if (snap.exists()) setScheduleImages(snap.data() as { weekly: string | null, yearly: string | null });
+        });
 
-    const todosRef = collection(db, 'artifacts', appId, 'public', 'data', 'shared_todos');
-    const unsubTodos = onSnapshot(query(todosRef, orderBy('createdAt', 'desc')), (snap) => {
-      setSharedTodos(snap.docs.map(d => ({ id: d.id, ...d.data() } as Todo)));
-    });
+        const todosRef = collection(db, 'artifacts', appId, 'public', 'data', 'shared_todos');
+        unsubTodos = onSnapshot(query(todosRef, orderBy('createdAt', 'desc')), (snap) => {
+        setSharedTodos(snap.docs.map(d => ({ id: d.id, ...d.data() } as Todo)));
+        });
 
-    return () => { unsubMain(); unsubImg(); unsubTodos(); };
+    } catch (err) {
+        console.error("Setup failed", err);
+    }
+
+    // ALWAYS return a cleanup function to satisfy TypeScript strict mode
+    return () => {
+        if (unsubMain) unsubMain();
+        if (unsubImg) unsubImg();
+        if (unsubTodos) unsubTodos();
+    };
   }, [user]);
 
   // --- ACTIONS ---
@@ -355,6 +397,7 @@ export default function App() {
     if (passwordInput === storedPassword) {
       setIsLocked(false);
       setAuthError('');
+      setPasswordInput(''); // FIX: Clear input on successful login
     } else {
       setAuthError('Incorrect Access Code');
     }
@@ -368,6 +411,12 @@ export default function App() {
     setStoredPassword(setupPassword); 
     savePrivate({ password: setupPassword });
     setIsLocked(false);
+    setSetupPassword(''); // FIX: Clear setup input
+  };
+
+  const handleLock = () => {
+    setIsLocked(true);
+    setPasswordInput(''); // FIX: Clear input when locking
   };
 
   const toggleAttendance = (studentId: number) => {
@@ -1104,7 +1153,7 @@ export default function App() {
                  <div className="text-[10px] text-slate-500 dark:text-slate-400 truncate">{isDemoMode ? 'Demo Mode' : 'Live Data'}</div>
                </div>
              </div>
-             <Button variant="secondary" size="sm" className="w-full" icon={Lock} onClick={() => setIsLocked(true)}>Lock System</Button>
+             <Button variant="secondary" size="sm" className="w-full" icon={Lock} onClick={handleLock}>Lock System</Button>
           </div>
         </div>
       </aside>
