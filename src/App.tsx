@@ -32,6 +32,41 @@ const appId = typeof __app_id !== 'undefined' && __app_id ? __app_id : 'global-l
 const firebaseConfigStr = typeof __firebase_config !== 'undefined' ? __firebase_config : '';
 const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : '';
 
+// --- ADD YOUR API KEY HERE ---
+const SYSTEM_GEMINI_KEY = "AIzaSyAWQg_QaPJbcoDtWywzaB7E-hfmwXrOFeM"; // Paste your key inside the quotes
+
+// --- AI HELPER FUNCTION ---
+async function callGemini(prompt: string, customKey?: string) {
+  const keyToUse = customKey || SYSTEM_GEMINI_KEY;
+  
+  if (!keyToUse) {
+      return "Please configure your Gemini API Key in the code (SYSTEM_GEMINI_KEY) or Settings.";
+  }
+
+  try {
+    const response = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${keyToUse}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: prompt }] }]
+        })
+      }
+    );
+
+    if (!response.ok) {
+      throw new Error(`Gemini API Error: ${response.statusText}`);
+    }
+
+    const data = await response.json();
+    return data.candidates?.[0]?.content?.parts?.[0]?.text || "Sorry, I couldn't generate a response.";
+  } catch (error) {
+    console.error("Gemini API Request Failed", error);
+    return "I'm currently offline or experiencing high traffic. Please try again later.";
+  }
+}
+
 // --- TYPES ---
 interface Student {
   id: number;
@@ -351,6 +386,15 @@ export default function App() {
   const [isFocusMode, setIsFocusMode] = useState(false); // Focus Mode
   const [weather, setWeather] = useState({ temp: 24, condition: 'Sunny' });
   
+  // --- ADD AI STATE HERE (Around Line 350) ---
+  const [aiChatHistory, setAiChatHistory] = useState<{role: string, text: string}[]>([
+    { role: 'model', text: "Hello! I'm your teaching assistant. I can help you plan lessons, write emails, or analyze student data." }
+  ]);
+  const [aiInput, setAiInput] = useState('');
+  const [isAiThinking, setIsAiThinking] = useState(false);
+  const [customApiKey, setCustomApiKey] = useState('');
+  const chatEndRef = useRef<HTMLDivElement>(null);
+
   // Feature Specific States
   const [quickNotes, setQuickNotes] = useState(''); // Scratchpad
   const [teacherXP, setTeacherXP] = useState(1250); // Gamification
@@ -537,6 +581,11 @@ export default function App() {
     };
   }, [user]);
 
+  // --- ADD EFFECT FOR CHAT SCROLLING ---
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [aiChatHistory]);
+
   // --- ACTIONS ---
 
   const savePrivate = async (data: any) => {
@@ -694,6 +743,26 @@ export default function App() {
           condition: prev.condition === 'Sunny' ? 'Rainy' : 'Sunny'
       }));
   }
+
+  // --- ADD AI ACTIONS (Inside App function) ---
+  const sendAiMessage = async () => {
+    if (!aiInput.trim()) return;
+    const newUserMsg = { role: 'user', text: aiInput };
+    const updatedHistory = [...aiChatHistory, newUserMsg];
+    setAiChatHistory(updatedHistory);
+    setAiInput('');
+    setIsAiThinking(true);
+
+    try {
+        const responseText = await callGemini(newUserMsg.text, customApiKey);
+        const modelMsg = { role: 'model', text: responseText };
+        setAiChatHistory([...updatedHistory, modelMsg]);
+    } catch (e) {
+        // Error handled in callGemini
+    } finally {
+        setIsAiThinking(false);
+    }
+  };
 
   // --- RENDERERS ---
 
@@ -1140,6 +1209,50 @@ export default function App() {
       </div>
   );
 
+  // --- ADD AI RENDERER (Inside App function) ---
+  const renderAiChat = () => (
+    <div className="h-full flex flex-col gap-4 animate-in fade-in">
+        <div className="flex justify-between items-center">
+            <h2 className="text-2xl font-bold text-slate-800 dark:text-white flex items-center gap-2"><Sparkles className="text-indigo-500"/> AI Assistant</h2>
+        </div>
+        <Card className="flex-1 flex flex-col min-h-0 bg-slate-50 dark:bg-slate-900/50 border-slate-200 dark:border-slate-700">
+            <div className="flex-1 overflow-y-auto p-4 space-y-4">
+                {aiChatHistory.map((msg, i) => (
+                    <div key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                        <div className={`max-w-[80%] p-4 rounded-2xl text-sm whitespace-pre-wrap leading-relaxed shadow-sm ${
+                            msg.role === 'user' 
+                            ? 'bg-indigo-600 text-white rounded-br-none' 
+                            : 'bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 rounded-bl-none border border-slate-100 dark:border-slate-700'
+                        }`}>
+                            {msg.text}
+                        </div>
+                    </div>
+                ))}
+                {isAiThinking && (
+                    <div className="flex justify-start">
+                        <div className="bg-white dark:bg-slate-800 p-4 rounded-2xl rounded-bl-none border border-slate-100 dark:border-slate-700 flex gap-2 items-center">
+                            <div className="w-2 h-2 bg-indigo-400 rounded-full animate-bounce" style={{animationDelay: '0ms'}}/>
+                            <div className="w-2 h-2 bg-indigo-400 rounded-full animate-bounce" style={{animationDelay: '150ms'}}/>
+                            <div className="w-2 h-2 bg-indigo-400 rounded-full animate-bounce" style={{animationDelay: '300ms'}}/>
+                        </div>
+                    </div>
+                )}
+                <div ref={chatEndRef} />
+            </div>
+            <div className="p-4 bg-white dark:bg-slate-800 border-t border-slate-100 dark:border-slate-700 flex gap-2">
+                <input 
+                    className="flex-1 bg-slate-50 dark:bg-slate-900 border-0 rounded-xl px-4 py-3 focus:ring-2 focus:ring-indigo-500 outline-none dark:text-white"
+                    placeholder="Ask for lesson ideas, email drafts, or advice..."
+                    value={aiInput}
+                    onChange={e => setAiInput(e.target.value)}
+                    onKeyDown={e => e.key === 'Enter' && sendAiMessage()}
+                />
+                <Button onClick={sendAiMessage} variant="ai" icon={Send} disabled={!aiInput.trim() || isAiThinking}>Send</Button>
+            </div>
+        </Card>
+    </div>
+  );
+
   if (isAuthLoading) return <div className="h-screen flex items-center justify-center bg-slate-50 dark:bg-slate-900"><Loader className="animate-spin text-indigo-600"/></div>;
   if (!user || storedPassword === null || isLocked) return renderLockScreen();
 
@@ -1229,14 +1342,28 @@ export default function App() {
             {activeTab === 'curriculum' && renderCurriculum()}
             {activeTab === 'schedule' && renderSchedule()}
             {activeTab === 'attendance' && renderAttendance()}
-            {/* Placeholders for other tabs to prevent crash if clicked */}
+            {/* UPDATED TABS BELOW */}
+            {activeTab === 'ai_assistant' && renderAiChat()}
             {activeTab === 'report' && <div className="flex flex-col items-center justify-center h-full text-slate-400"><FileText size={48} className="mb-4 opacity-20"/><p>Report Generation Module</p></div>}
-            {activeTab === 'ai_assistant' && <div className="flex flex-col items-center justify-center h-full text-slate-400"><Sparkles size={48} className="mb-4 opacity-20"/><p>AI Assistant Module</p></div>}
-            {activeTab === 'settings' && <div className="flex flex-col items-center justify-center h-full text-slate-400"><Settings size={48} className="mb-4 opacity-20"/><p>Settings Module</p></div>}
+            {activeTab === 'settings' && (
+                <div className="max-w-xl mx-auto pt-10">
+                    <Card>
+                        <h3 className="font-bold mb-4">API Configuration</h3>
+                        <label className="text-xs font-bold text-slate-500 block mb-2">Custom Gemini API Key</label>
+                        <input 
+                            type="password" 
+                            className="w-full p-3 rounded-xl border border-slate-200 dark:border-slate-600 dark:bg-slate-900"
+                            placeholder="AIza..."
+                            value={customApiKey}
+                            onChange={e => setCustomApiKey(e.target.value)}
+                        />
+                        <p className="text-xs text-slate-400 mt-2">Overrides the system key if provided.</p>
+                    </Card>
+                </div>
+            )}
           </div>
         </div>
 
-        {/* Overlays */}
         {renderFocusMode()}
         {renderImageModal()}
       </main>
